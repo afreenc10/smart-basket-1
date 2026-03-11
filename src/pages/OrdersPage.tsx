@@ -1,8 +1,9 @@
 import { useState, useEffect } from 'react';
 import { Package, Clock, Truck, CheckCircle } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
-import { supabase } from '../lib/supabase';
 import { Order } from '../types';
+
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
 
 const statusConfig = {
   Pending: { icon: Clock, color: 'bg-yellow-100 text-yellow-800', iconColor: 'text-yellow-600' },
@@ -23,16 +24,16 @@ export default function OrdersPage() {
     }
   }, [user]);
 
+  // ── Logged-in user orders ──────────────────────────────────────────────────
   const fetchOrders = async () => {
     try {
-      const { data, error } = await supabase
-        .from('orders')
-        .select('*')
-        .eq('user_id', user?.id)
-        .order('created_at', { ascending: false });
-
-      if (error) throw error;
-      setOrders(data || []);
+      const token = localStorage.getItem('auth_token');
+      const res = await fetch(`${API_URL}/api/orders/my-orders`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) throw new Error('Failed to fetch orders');
+      const data = await res.json();
+      setOrders(data);
     } catch (error) {
       console.error('Error fetching orders:', error);
     } finally {
@@ -40,24 +41,28 @@ export default function OrdersPage() {
     }
   };
 
+  // ── Guest orders (stored by order_number in localStorage) ─────────────────
   const fetchGuestOrders = async () => {
-    const guestOrders = localStorage.getItem('guestOrders');
-    if (guestOrders) {
-      try {
-        const orderIds = JSON.parse(guestOrders);
-        const { data, error } = await supabase
-          .from('orders')
-          .select('*')
-          .in('id', orderIds)
-          .order('created_at', { ascending: false });
-
-        if (error) throw error;
-        setOrders(data || []);
-      } catch (error) {
-        console.error('Error fetching guest orders:', error);
+    try {
+      const stored = localStorage.getItem('guestOrders');
+      if (stored) {
+        const orderNumbers: string[] = JSON.parse(stored);
+        if (orderNumbers.length > 0) {
+          const res = await fetch(`${API_URL}/api/orders/guest`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ order_numbers: orderNumbers }),
+          });
+          if (!res.ok) throw new Error('Failed to fetch guest orders');
+          const data = await res.json();
+          setOrders(data);
+        }
       }
+    } catch (error) {
+      console.error('Error fetching guest orders:', error);
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
   };
 
   if (loading) {
@@ -88,7 +93,7 @@ export default function OrdersPage() {
         <div className="space-y-4">
           {orders.map((order) => {
             const status = order.status as keyof typeof statusConfig;
-            const config = statusConfig[status];
+            const config = statusConfig[status] || statusConfig['Pending'];
             const StatusIcon = config.icon;
 
             return (
@@ -102,12 +107,12 @@ export default function OrdersPage() {
                       Order #{order.order_number}
                     </h3>
                     <p className="text-sm text-gray-600">
-                      Placed on {new Date(order.created_at).toLocaleDateString('en-US', {
+                      Placed on {new Date(order.created_at).toLocaleDateString('en-IN', {
                         year: 'numeric',
                         month: 'long',
                         day: 'numeric',
                         hour: '2-digit',
-                        minute: '2-digit'
+                        minute: '2-digit',
                       })}
                     </p>
                   </div>
@@ -130,14 +135,14 @@ export default function OrdersPage() {
                   <div className="text-right">
                     <p className="text-sm text-gray-600 mb-1">Total Amount</p>
                     <p className="text-3xl font-bold text-green-600">
-                      ${order.total_amount.toFixed(2)}
+                      ₹{Number(order.total_amount).toFixed(2)}
                     </p>
                   </div>
                 </div>
               </div>
             );
           })}
-        </div>
+        </div>f
       </div>
     </div>
   );

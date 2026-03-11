@@ -1,11 +1,12 @@
 import { useState, useEffect } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { Search } from 'lucide-react';
-import { supabase } from '../lib/supabase';
 import { Product } from '../types';
 import ProductCard from '../components/ProductCard';
 
-const categories = ['All', 'Fruits', 'Vegetables', 'Dairy', 'Snacks', 'Beverages'];
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
+
+const categories = ['All', 'Fruits & Vegetables', 'Dairy & Eggs', 'Bakery', 'Beverages', 'Snacks', 'Staples'];
 
 export default function ProductsPage() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -22,13 +23,10 @@ export default function ProductsPage() {
 
   const fetchProducts = async () => {
     try {
-      const { data, error } = await supabase
-        .from('products')
-        .select('*')
-        .order('name');
-
-      if (error) throw error;
-      setProducts(data || []);
+      const res = await fetch(`${API_URL}/api/products`);
+      if (!res.ok) throw new Error('Failed to fetch products');
+      const data = await res.json();
+      setProducts(data);
     } catch (error) {
       console.error('Error fetching products:', error);
     } finally {
@@ -66,7 +64,6 @@ export default function ProductsPage() {
     <div className="min-h-screen bg-gray-50 py-8">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <h1 className="text-4xl font-bold text-gray-900 mb-8">Our Products</h1>
-
         <div className="mb-8 space-y-4">
           <div className="relative">
             <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 h-5 w-5" />
@@ -78,7 +75,6 @@ export default function ProductsPage() {
               className="w-full pl-10 pr-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent"
             />
           </div>
-
           <div className="flex flex-wrap gap-2">
             {categories.map((category) => (
               <button
@@ -95,7 +91,6 @@ export default function ProductsPage() {
             ))}
           </div>
         </div>
-
         {filteredProducts.length === 0 ? (
           <div className="text-center py-12">
             <p className="text-xl text-gray-600">No products found</p>

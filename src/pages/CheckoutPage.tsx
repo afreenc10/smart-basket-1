@@ -1,17 +1,66 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { CheckCircle } from 'lucide-react';
+import { CheckCircle, Truck, Zap, Crown, MapPin } from 'lucide-react';
 import { useCart } from '../contexts/CartContext';
 import { useAuth } from '../contexts/AuthContext';
-import { supabase } from '../lib/supabase';
+import { usePayment } from '../contexts/PaymentContext';
+import PaymentModal from '../components/PaymentModal';
+import { PaymentDetails } from '../types';
+
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
+
+const SHIPPING_OPTIONS = [
+  {
+    id: 'standard',
+    name: 'Standard Delivery',
+    cost: 50,
+    days: '5-7',
+    icon: Truck,
+    description: 'Regular delivery',
+  },
+  {
+    id: 'express',
+    name: 'Express Delivery',
+    cost: 100,
+    days: '2-3',
+    icon: Zap,
+    description: 'Faster delivery',
+  },
+  {
+    id: 'premium',
+    name: 'Premium Delivery',
+    cost: 150,
+    days: '1',
+    icon: Crown,
+    description: 'Next day delivery',
+  },
+];
 
 export default function CheckoutPage() {
   const { cartItems, getCartTotal, clearCart } = useCart();
   const { user } = useAuth();
+  const { processPayment } = usePayment();
   const navigate = useNavigate();
-  const [loading, setLoading] = useState(false);
   const [orderComplete, setOrderComplete] = useState(false);
   const [orderNumber, setOrderNumber] = useState('');
+  const [paymentModalOpen, setPaymentModalOpen] = useState(false);
+  const [paymentError, setPaymentError] = useState('');
+  const [paymentSuccess, setPaymentSuccess] = useState(false);
+  const [paymentTransactionId, setPaymentTransactionId] = useState('');
+
+  // Saved addresses
+  interface SavedAddress {
+    id: string;
+    name: string;
+    phone: string;
+    address: string;
+    pincode: string;
+    is_default: boolean;
+  }
+
+  const [savedAddresses, setSavedAddresses] = useState<SavedAddress[]>([]);
+  const [usingSavedAddress, setUsingSavedAddress] = useState(false);
+  const [selectedAddressId, setSelectedAddressId] = useState<string>('');
 
   const [formData, setFormData] = useState({
     name: '',
@@ -20,61 +69,264 @@ export default function CheckoutPage() {
     pincode: '',
   });
 
+  const [shippingOption, setShippingOption] = useState<string>('standard');
+
+  const [fieldErrors, setFieldErrors] = useState<{
+    name?: string;
+    phone?: string;
+    address?: string;
+    pincode?: string;
+  }>({});
+
+  // Fetch saved addresses on mount if user is logged in
+  useEffect(() => {
+    if (user) {
+      fetchSavedAddresses();
+    }
+  }, [user]);
+
+  const fetchSavedAddresses = async () => {
+    try {
+      const token = localStorage.getItem('auth_token');
+      const res = await fetch(`${API_URL}/api/user/addresses`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setSavedAddresses(data);
+        
+        // Pre-select default address
+        const defaultAddr = data.find((addr: SavedAddress) => addr.is_default);
+        if (defaultAddr) {
+          setSelectedAddressId(defaultAddr.id);
+          setUsingSavedAddress(true);
+          setFormData({
+            name: defaultAddr.name,
+            phone: defaultAddr.phone,
+            address: defaultAddr.address,
+            pincode: defaultAddr.pincode,
+          });
+        }
+      }
+    } catch (error) {
+      console.error('Error fetching saved addresses:', error);
+    }
+  };
+
+  const handleSelectSavedAddress = (addressId: string) => {
+    const selected = savedAddresses.find(addr => addr.id === addressId);
+    if (selected) {
+      setSelectedAddressId(addressId);
+      setFormData({
+        name: selected.name,
+        phone: selected.phone,
+        address: selected.address,
+        pincode: selected.pincode,
+      });
+      setFieldErrors({});
+    }
+  };
+
+  const validateName = (name: string): string | null => {
+    if (!name.trim()) {
+      return 'Full name is required';
+    }
+    if (name.trim().length < 2) {
+      return 'Name must be at least 2 characters';
+    }
+    if (!/^[a-zA-Z\s'-]+$/.test(name)) {
+      return 'Name can only contain letters, spaces, hyphens, and apostrophes';
+    }
+    return null;
+  };
+
+  const validatePhone = (phone: string): string | null => {
+    if (!phone.trim()) {
+      return 'Phone number is required';
+    }
+    const phoneRegex = /^[0-9]{10}$/;
+    if (!phoneRegex.test(phone.replace(/\D/g, ''))) {
+      return 'Phone number must be a valid 10-digit number';
+    }
+    return null;
+  };
+
+  const validateAddress = (address: string): string | null => {
+    if (!address.trim()) {
+      return 'Delivery address is required';
+    }
+    if (address.trim().length < 10) {
+      return 'Address must be at least 10 characters';
+    }
+    return null;
+  };
+
+  const validatePincode = (pincode: string): string | null => {
+    if (!pincode.trim()) {
+      return 'Pincode is required';
+    }
+    const pincodeRegex = /^[0-9]{6}$/;
+    if (!pincodeRegex.test(pincode.trim())) {
+      return 'Pincode must be a valid 6-digit number';
+    }
+    return null;
+  };
+
   const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
-    setFormData({ ...formData, [e.target.name]: e.target.value });
+    const { name, value } = e.target;
+    setFormData({ ...formData, [name]: value });
+    setUsingSavedAddress(false);
+    
+    // Clear field error on change
+    if (fieldErrors[name as keyof typeof fieldErrors]) {
+      setFieldErrors({ ...fieldErrors, [name]: '' });
+    }
   };
 
   const generateOrderNumber = () => {
     return 'ORD' + Date.now() + Math.floor(Math.random() * 1000);
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setLoading(true);
+  const getShippingCost = () => {
+    const selected = SHIPPING_OPTIONS.find(opt => opt.id === shippingOption);
+    return selected?.cost || 50;
+  };
+
+  const handlePaymentSubmit = async (paymentDetails: PaymentDetails) => {
+    const shippingCost = getShippingCost();
+    const total = getCartTotal() + shippingCost;
+    setPaymentError('');
 
     try {
-      const orderNum = generateOrderNumber();
-      const total = getCartTotal() + 5;
+      const response = await processPayment(paymentDetails, total);
 
-      const { data: order, error: orderError } = await supabase
-        .from('orders')
-        .insert({
-          order_number: orderNum,
-          user_id: user?.id || null,
-          customer_name: formData.name,
-          customer_phone: formData.phone,
-          delivery_address: formData.address,
-          pincode: formData.pincode,
-          total_amount: total,
-          status: 'Pending',
-        })
-        .select()
-        .single();
+      if (response.success) {
+        setPaymentSuccess(true);
+        setPaymentTransactionId(response.transactionId);
 
-      if (orderError) throw orderError;
+        // Create order after successful payment
+        setTimeout(async () => {
+          try {
+            const orderNum = generateOrderNumber();
+            const token = localStorage.getItem('auth_token');
 
-      const orderItems = cartItems.map((item) => ({
-        order_id: order.id,
-        product_id: item.product.id,
-        quantity: item.quantity,
-        price: item.product.price,
-      }));
+            const orderRes = await fetch(`${API_URL}/api/orders`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                ...(token ? { Authorization: `Bearer ${token}` } : {}),
+              },
+              body: JSON.stringify({
+                order_number: orderNum,
+                user_id: user?.id || null,
+                customer_name: formData.name,
+                customer_phone: formData.phone,
+                delivery_address: formData.address,
+                pincode: formData.pincode,
+                total_amount: total,
+                status: 'Confirmed',
+                items: cartItems.map((item) => ({
+                  product_id: item.product.id,
+                  quantity: item.quantity,
+                  price: item.product.price,
+                })),
+                payment_method: paymentDetails.method,
+                transaction_id: response.transactionId,
+                shipping_method: shippingOption,
+                shipping_cost: shippingCost,
+              }),
+            });
 
-      const { error: itemsError } = await supabase
-        .from('order_items')
-        .insert(orderItems);
+            if (!orderRes.ok) {
+              const err = await orderRes.json();
+              throw new Error(err.error || 'Failed to create order');
+            }
 
-      if (itemsError) throw itemsError;
+            // Auto-save address for logged-in users if not using saved address
+            if (user && !usingSavedAddress) {
+              try {
+                const token = localStorage.getItem('auth_token');
+                await fetch(`${API_URL}/api/user/addresses`, {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/json',
+                    Authorization: `Bearer ${token}`,
+                  },
+                  body: JSON.stringify({
+                    name: formData.name,
+                    phone: formData.phone,
+                    address: formData.address,
+                    pincode: formData.pincode,
+                  }),
+                });
+              } catch (error) {
+                console.error('Error saving address:', error);
+              }
+            }
 
-      setOrderNumber(orderNum);
-      setOrderComplete(true);
-      clearCart();
+            // Auto-save payment method for logged-in users if flag is set
+            if (user && paymentDetails.shouldSave) {
+              try {
+                const token = localStorage.getItem('auth_token');
+                const cardHolder = paymentDetails.cardHolder || 'Saved Card';
+                const cardNumber = paymentDetails.cardNumber || '';
+                const paymentMethod = paymentDetails.method;
+
+                await fetch(`${API_URL}/api/user/payments`, {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/json',
+                    Authorization: `Bearer ${token}`,
+                  },
+                  body: JSON.stringify({
+                    card_holder: cardHolder,
+                    card_number: cardNumber,
+                    payment_method: paymentMethod,
+                  }),
+                });
+              } catch (error) {
+                console.error('Error saving payment method:', error);
+              }
+            }
+
+            setOrderNumber(orderNum);
+            setOrderComplete(true);
+            clearCart();
+          } catch (error) {
+            console.error('Error creating order:', error);
+            alert('Order creation failed. Please contact support with transaction ID: ' + response.transactionId);
+          }
+        }, 2000);
+      } else {
+        setPaymentError(response.message);
+      }
     } catch (error) {
-      console.error('Error creating order:', error);
-      alert('Failed to create order. Please try again.');
-    } finally {
-      setLoading(false);
+      console.error('Payment error:', error);
+      setPaymentError('Payment processing failed. Please try again.');
     }
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+
+    // Validate all fields
+    const nameError = validateName(formData.name);
+    const phoneError = validatePhone(formData.phone);
+    const addressError = validateAddress(formData.address);
+    const pincodeError = validatePincode(formData.pincode);
+
+    if (nameError || phoneError || addressError || pincodeError) {
+      setFieldErrors({
+        name: nameError || '',
+        phone: phoneError || '',
+        address: addressError || '',
+        pincode: pincodeError || '',
+      });
+      return;
+    }
+
+    // Open payment modal instead of creating order directly
+    setPaymentModalOpen(true);
   };
 
   if (cartItems.length === 0 && !orderComplete) {
@@ -128,72 +380,189 @@ export default function CheckoutPage() {
           <div className="bg-white rounded-lg shadow-md p-6">
             <h2 className="text-2xl font-bold text-gray-900 mb-6">Delivery Information</h2>
             <form onSubmit={handleSubmit} className="space-y-4">
-              <div>
-                <label htmlFor="name" className="block text-sm font-medium text-gray-700 mb-1">
-                  Full Name
-                </label>
-                <input
-                  type="text"
-                  id="name"
-                  name="name"
-                  required
-                  value={formData.name}
-                  onChange={handleChange}
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent"
-                />
-              </div>
+              {/* Saved Addresses Section for Logged-in Users */}
+              {user && savedAddresses.length > 0 && !usingSavedAddress && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const defaultAddr = savedAddresses.find(addr => addr.is_default);
+                    if (defaultAddr) {
+                      handleSelectSavedAddress(defaultAddr.id);
+                    }
+                  }}
+                  className="w-full text-center text-sm bg-green-50 border border-green-300 text-green-700 hover:bg-green-100 font-semibold py-2 rounded-lg transition"
+                >
+                  ← Use Saved Address
+                </button>
+              )}
+
+              {user && savedAddresses.length > 0 && usingSavedAddress && (
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-3">
+                    <MapPin className="inline mr-2 h-4 w-4" />
+                    Saved Addresses
+                  </label>
+                  <div className="space-y-2 mb-4">
+                    {savedAddresses.map((addr) => (
+                      <label key={addr.id} className="flex items-start p-3 border border-gray-300 rounded-lg cursor-pointer hover:bg-gray-50 transition">
+                        <input
+                          type="radio"
+                          name="savedAddress"
+                          checked={selectedAddressId === addr.id}
+                          onChange={() => handleSelectSavedAddress(addr.id)}
+                          className="w-4 h-4 text-green-600 mt-1"
+                        />
+                        <div className="ml-3 flex-1">
+                          <p className="font-medium text-gray-900">{addr.name}</p>
+                          <p className="text-xs text-gray-600">{addr.phone}</p>
+                          <p className="text-xs text-gray-600">{addr.address}, {addr.pincode}</p>
+                        </div>
+                      </label>
+                    ))}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setUsingSavedAddress(false);
+                      setFormData({ name: '', phone: '', address: '', pincode: '' });
+                      setFieldErrors({});
+                    }}
+                    className="w-full text-center text-sm text-green-600 hover:text-green-700 font-semibold py-2 border border-green-600 rounded-lg hover:bg-green-50 mb-4 transition"
+                  >
+                    Use Different Address
+                  </button>
+                </div>
+              )}
+
+              {user && savedAddresses.length === 0 && (
+                <div className="bg-blue-50 border border-blue-300 rounded-lg p-4 mb-4">
+                  <p className="text-sm text-blue-700">
+                    💡 Save your delivery addresses to <a href="/account" className="font-semibold hover:underline">Account Settings</a> for faster checkout!
+                  </p>
+                </div>
+              )}
+
+              {!usingSavedAddress && (
+                <>
+                  <div>
+                    <label htmlFor="name" className="block text-sm font-medium text-gray-700 mb-1">
+                      Full Name
+                    </label>
+                    <input
+                      type="text"
+                      id="name"
+                      name="name"
+                      required
+                      value={formData.name}
+                      onChange={handleChange}
+                      className={`w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent ${
+                        fieldErrors.name ? 'border-red-500' : 'border-gray-300'
+                      }`}
+                    />
+                    {fieldErrors.name && (
+                      <p className="mt-1 text-sm text-red-600">{fieldErrors.name}</p>
+                    )}
+                  </div>
+
+                  <div>
+                    <label htmlFor="phone" className="block text-sm font-medium text-gray-700 mb-1">
+                      Phone Number
+                    </label>
+                    <input
+                      type="tel"
+                      id="phone"
+                      name="phone"
+                      required
+                      value={formData.phone}
+                      onChange={handleChange}
+                      className={`w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent ${
+                        fieldErrors.phone ? 'border-red-500' : 'border-gray-300'
+                      }`}
+                      placeholder="10-digit phone number"
+                    />
+                    {fieldErrors.phone && (
+                      <p className="mt-1 text-sm text-red-600">{fieldErrors.phone}</p>
+                    )}
+                  </div>
+
+                  <div>
+                    <label htmlFor="address" className="block text-sm font-medium text-gray-700 mb-1">
+                      Delivery Address
+                    </label>
+                    <textarea
+                      id="address"
+                      name="address"
+                      required
+                      rows={3}
+                      value={formData.address}
+                      onChange={handleChange}
+                      className={`w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent ${
+                        fieldErrors.address ? 'border-red-500' : 'border-gray-300'
+                      }`}
+                      placeholder="Enter your complete delivery address"
+                    />
+                    {fieldErrors.address && (
+                      <p className="mt-1 text-sm text-red-600">{fieldErrors.address}</p>
+                    )}
+                  </div>
+
+                  <div>
+                    <label htmlFor="pincode" className="block text-sm font-medium text-gray-700 mb-1">
+                      Pincode
+                    </label>
+                    <input
+                      type="text"
+                      id="pincode"
+                      name="pincode"
+                      required
+                      value={formData.pincode}
+                      onChange={handleChange}
+                      className={`w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent ${
+                        fieldErrors.pincode ? 'border-red-500' : 'border-gray-300'
+                      }`}
+                      placeholder="6-digit pincode"
+                    />
+                    {fieldErrors.pincode && (
+                      <p className="mt-1 text-sm text-red-600">{fieldErrors.pincode}</p>
+                    )}
+                  </div>
+                </>
+              )}
 
               <div>
-                <label htmlFor="phone" className="block text-sm font-medium text-gray-700 mb-1">
-                  Phone Number
+                <label className="block text-sm font-medium text-gray-700 mb-3">
+                  Shipping Option
                 </label>
-                <input
-                  type="tel"
-                  id="phone"
-                  name="phone"
-                  required
-                  value={formData.phone}
-                  onChange={handleChange}
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent"
-                />
-              </div>
-
-              <div>
-                <label htmlFor="address" className="block text-sm font-medium text-gray-700 mb-1">
-                  Delivery Address
-                </label>
-                <textarea
-                  id="address"
-                  name="address"
-                  required
-                  rows={3}
-                  value={formData.address}
-                  onChange={handleChange}
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent"
-                />
-              </div>
-
-              <div>
-                <label htmlFor="pincode" className="block text-sm font-medium text-gray-700 mb-1">
-                  Pincode
-                </label>
-                <input
-                  type="text"
-                  id="pincode"
-                  name="pincode"
-                  required
-                  value={formData.pincode}
-                  onChange={handleChange}
-                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent"
-                />
+                <div className="space-y-2">
+                  {SHIPPING_OPTIONS.map((option) => {
+                    const Icon = option.icon;
+                    return (
+                      <label key={option.id} className="flex items-center p-3 border border-gray-300 rounded-lg cursor-pointer hover:bg-gray-50 transition">
+                        <input
+                          type="radio"
+                          name="shipping"
+                          value={option.id}
+                          checked={shippingOption === option.id}
+                          onChange={(e) => setShippingOption(e.target.value)}
+                          className="w-4 h-4 text-green-600"
+                        />
+                        <Icon className="w-5 h-5 text-green-600 ml-3" />
+                        <div className="ml-2 flex-1">
+                          <p className="font-medium text-gray-900">{option.name}</p>
+                          <p className="text-xs text-gray-600">{option.days} days • {option.description}</p>
+                        </div>
+                        <span className="font-semibold text-gray-900">₹{option.cost}</span>
+                      </label>
+                    );
+                  })}
+                </div>
               </div>
 
               <button
                 type="submit"
-                disabled={loading}
-                className="w-full bg-green-600 hover:bg-green-700 disabled:bg-gray-400 text-white py-3 rounded-lg font-semibold transition disabled:cursor-not-allowed"
+                className="w-full bg-green-600 hover:bg-green-700 text-white py-3 rounded-lg font-semibold transition"
               >
-                {loading ? 'Processing...' : 'Place Order'}
+                Proceed to Payment
               </button>
             </form>
           </div>
@@ -207,21 +576,21 @@ export default function CheckoutPage() {
                     <span>
                       {product.name} x {quantity}
                     </span>
-                    <span>${(product.price * quantity).toFixed(2)}</span>
+                    <span>₹{(product.price * quantity).toFixed(2)}</span>
                   </div>
                 ))}
                 <div className="border-t pt-3">
                   <div className="flex justify-between text-gray-600 mb-2">
                     <span>Subtotal</span>
-                    <span>${total.toFixed(2)}</span>
+                    <span>₹{total.toFixed(2)}</span>
                   </div>
                   <div className="flex justify-between text-gray-600 mb-3">
-                    <span>Delivery Fee</span>
-                    <span>$5.00</span>
+                    <span>{SHIPPING_OPTIONS.find(opt => opt.id === shippingOption)?.name}</span>
+                    <span>₹{getShippingCost().toFixed(2)}</span>
                   </div>
                   <div className="flex justify-between text-xl font-bold text-gray-900">
                     <span>Total</span>
-                    <span>${(total + 5).toFixed(2)}</span>
+                    <span>₹{(total + getShippingCost()).toFixed(2)}</span>
                   </div>
                 </div>
               </div>
@@ -229,6 +598,37 @@ export default function CheckoutPage() {
           </div>
         </div>
       </div>
+
+      {/* Payment Modal */}
+      <PaymentModal
+        isOpen={paymentModalOpen && !paymentSuccess}
+        amount={getCartTotal() + getShippingCost()}
+        onClose={() => {
+          setPaymentModalOpen(false);
+          setPaymentError('');
+        }}
+        onSubmit={handlePaymentSubmit}
+        error={paymentError}
+        success={paymentSuccess}
+        transactionId={paymentTransactionId}
+        user={user}
+      />
+
+      {/* Success Overlay for Payment Modal */}
+      {paymentSuccess && (
+        <PaymentModal
+          isOpen={true}
+          amount={getCartTotal() + getShippingCost()}
+          onClose={() => {
+            setPaymentModalOpen(false);
+            setPaymentSuccess(false);
+          }}
+          onSubmit={handlePaymentSubmit}
+          success={true}
+          transactionId={paymentTransactionId}
+          user={user}
+        />
+      )}
     </div>
   );
 }
