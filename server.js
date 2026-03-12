@@ -1,7 +1,9 @@
 import express from 'express';
 import dotenv from 'dotenv';
-import mysql from 'mysql2/promise';
+import Database from 'better-sqlite3';
 import cors from 'cors';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
@@ -9,80 +11,21 @@ import { v4 as uuidv4 } from 'uuid';
 
 dotenv.config();
 
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
 const app = express();
 app.use(cors());
 app.use(express.json());
 
 // ─── DB Connection ────────────────────────────────────────────────────────────
-const db = await mysql.createConnection({
-  host: process.env.DB_HOST || 'localhost',
-  user: process.env.DB_USER || 'root',
-  password: process.env.DB_PASSWORD || '',
-  database: process.env.DB_NAME,
-});
+const dbPath = path.join(__dirname, 'db', 'smart_cart.db');
+const db = new Database(dbPath);
+db.pragma('foreign_keys = ON');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'your_jwt_secret_change_this';
 
-// ─── Initialize Database Tables ───────────────────────────────────────────────
-async function initializeTables() {
-  try {
-    // Create saved_addresses table
-    await db.query(`
-      CREATE TABLE IF NOT EXISTS saved_addresses (
-        id VARCHAR(36) PRIMARY KEY,
-        user_id VARCHAR(36) NOT NULL,
-        name VARCHAR(255) NOT NULL,
-        phone VARCHAR(20) NOT NULL,
-        address TEXT NOT NULL,
-        pincode VARCHAR(10) NOT NULL,
-        is_default BOOLEAN DEFAULT 0,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
-        INDEX idx_user_id (user_id),
-        INDEX idx_is_default (is_default)
-      )
-    `);
-
-    // Create saved_payments table
-    await db.query(`
-      CREATE TABLE IF NOT EXISTS saved_payments (
-        id VARCHAR(36) PRIMARY KEY,
-        user_id VARCHAR(36) NOT NULL,
-        card_holder VARCHAR(255) NOT NULL,
-        card_number VARCHAR(255) NOT NULL,
-        payment_method VARCHAR(50) NOT NULL DEFAULT 'credit_card',
-        is_default BOOLEAN DEFAULT 0,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
-        INDEX idx_user_id (user_id),
-        INDEX idx_is_default (is_default)
-      )
-    `);
-
-    // Create wishlist table
-    await db.query(`
-      CREATE TABLE IF NOT EXISTS wishlist (
-        id VARCHAR(36) PRIMARY KEY,
-        user_id VARCHAR(36) NOT NULL,
-        product_id VARCHAR(36) NOT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
-        FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE,
-        UNIQUE KEY unique_user_product (user_id, product_id),
-        INDEX idx_user_id (user_id),
-        INDEX idx_product_id (product_id)
-      )
-    `);
-
-    console.log('✅ Database tables initialized');
-  } catch (err) {
-    console.error('Error initializing tables:', err);
-  }
-}
-
-await initializeTables();
+console.log('✅ Connected to SQLite database at:', dbPath);
 
 // ─── Middleware: verify JWT ───────────────────────────────────────────────────
 function authMiddleware(req, res, next) {
@@ -99,23 +42,22 @@ function authMiddleware(req, res, next) {
 // ─── Auth Routes ─────────────────────────────────────────────────────────────
 
 // SIGN UP
-app.post('/api/auth/signup', async (req, res) => {
+app.post('/api/auth/signup', (req, res) => {
   const { email, password } = req.body;
   if (!email || !password)
     return res.status(400).json({ error: 'Email and password are required' });
 
   try {
-    const [existing] = await db.query('SELECT id FROM users WHERE email = ?', [email]);
+    const existing = db.prepare('SELECT id FROM users WHERE email = ?').get(email);
     
-    if (existing.length > 0)
+    if (existing)
       return res.status(400).json({ error: 'User already exists' });
 
-    const hashedPassword = await bcrypt.hash(password, 10);
+    const hashedPassword = bcrypt.hashSync(password, 10);
     const userId = uuidv4();
-    const [result] =await db.query(
-  'INSERT INTO users (id, email, password) VALUES (?, ?, ?)',
-  [userId, email, hashedPassword]
-);
+    
+    db.prepare('INSERT INTO users (id, email, password) VALUES (?, ?, ?)')
+      .run(userId, email, hashedPassword);
 
     const user = { id: userId, email };
     const token = jwt.sign(user, JWT_SECRET, { expiresIn: '7d' });
@@ -127,18 +69,18 @@ app.post('/api/auth/signup', async (req, res) => {
 });
 
 // SIGN IN
-app.post('/api/auth/signin', async (req, res) => {
+app.post('/api/auth/signin', (req, res) => {
   const { email, password } = req.body;
   if (!email || !password)
     return res.status(400).json({ error: 'Email and password are required' });
 
   try {
-    const [rows] = await db.query('SELECT * FROM users WHERE email = ?', [email]);
-    if (rows.length === 0)
+    const dbUser = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
+    
+    if (!dbUser)
       return res.status(401).json({ error: 'Invalid email or password' });
 
-    const dbUser = rows[0];
-    const isValid = await bcrypt.compare(password, dbUser.password);
+    const isValid = bcrypt.compareSync(password, dbUser.password);
     if (!isValid)
       return res.status(401).json({ error: 'Invalid email or password' });
 
@@ -161,16 +103,72 @@ app.post('/api/auth/signout', (_req, res) => {
   res.json({ message: 'Signed out' });
 });
 
-app.get('/api/products', async (req, res) => {
+// ─── Products Routes ──────────────────────────────────────────────────────────
+
+// GET all products with category info
+app.get('/api/products', (req, res) => {
   try {
-    const [rows] = await db.query('SELECT * FROM products ORDER BY name;');
+    const { category } = req.query;
+    let query = `
+      SELECT p.*, c.name as category_name, c.icon as category_icon, c.color as category_color
+      FROM products p
+      JOIN categories c ON p.category_id = c.id
+    `;
+    let params = [];
+
+    if (category) {
+      query += ' WHERE c.name = ?';
+      params.push(category);
+    }
+
+    query += ' ORDER BY p.name';
+
+    const rows = db.prepare(query).all(...params);
     res.json(rows);
-    //res.send("hello world");
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
-app.post('/api/orders', async (req, res) => {
+
+// GET all categories
+app.get('/api/categories', (req, res) => {
+  try {
+    const categories = db
+      .prepare(
+        `SELECT c.*, COUNT(p.id) as product_count
+         FROM categories c
+         LEFT JOIN products p ON c.id = p.category_id
+         GROUP BY c.id
+         ORDER BY c.name`
+      )
+      .all();
+    res.json(categories);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET products by category with product count
+app.get('/api/categories/:categoryId/products', (req, res) => {
+  try {
+    const { categoryId } = req.params;
+    const products = db
+      .prepare(
+        `SELECT p.*
+         FROM products p
+         WHERE p.category_id = ?
+         ORDER BY p.name`
+      )
+      .all(categoryId);
+    res.json(products);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── Orders Routes ────────────────────────────────────────────────────────────
+
+app.post('/api/orders', (req, res) => {
   const {
     order_number,
     user_id,
@@ -190,19 +188,17 @@ app.post('/api/orders', async (req, res) => {
     const orderId = uuidv4();
 
     // Insert order
-    await db.query(
+    db.prepare(
       `INSERT INTO orders 
         (id, order_number, user_id, customer_name, customer_phone, delivery_address, pincode, total_amount, status) 
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [orderId, order_number, user_id || null, customer_name, customer_phone, delivery_address, pincode, total_amount, status]
-    );
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(orderId, order_number, user_id || null, customer_name, customer_phone, delivery_address, pincode, total_amount, status);
 
     // Insert order items
     for (const item of items) {
-      await db.query(
-        `INSERT INTO order_items (id, order_id, product_id, quantity, price) VALUES (?, ?, ?, ?, ?)`,
-        [uuidv4(), orderId, item.product_id, item.quantity, item.price]
-      );
+      db.prepare(
+        `INSERT INTO order_items (id, order_id, product_id, quantity, price) VALUES (?, ?, ?, ?, ?)`
+      ).run(uuidv4(), orderId, item.product_id, item.quantity, item.price);
     }
 
     res.json({ id: orderId, order_number });
@@ -210,30 +206,25 @@ app.post('/api/orders', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
-// ─── Add these routes to your server.js ──────────────────────────────────────
 
 // GET orders for logged-in user
-app.get('/api/orders/my-orders', authMiddleware, async (req, res) => {
+app.get('/api/orders/my-orders', authMiddleware, (req, res) => {
   try {
-    const [rows] = await db.query(
-      'SELECT * FROM orders WHERE user_id = ? ORDER BY created_at DESC',
-      [req.user.id]
-    );
+    const rows = db.prepare(
+      'SELECT * FROM orders WHERE user_id = ? ORDER BY created_at DESC'
+    ).all(req.user.id);
 
     // Fetch items for each order
-    const ordersWithItems = await Promise.all(
-      rows.map(async (order) => {
-        const [itemRows] = await db.query(
-          `SELECT oi.product_id, oi.quantity, oi.price, p.name as product_name, p.image_url 
-           FROM order_items oi 
-           LEFT JOIN products p ON oi.product_id = p.id 
-           WHERE oi.order_id = ?`,
-          [order.id]
-        );
-        order.items = itemRows;
-        return order;
-      })
-    );
+    const ordersWithItems = rows.map((order) => {
+      const itemRows = db.prepare(
+        `SELECT oi.product_id, oi.quantity, oi.price, p.name as product_name, p.image_url 
+         FROM order_items oi 
+         LEFT JOIN products p ON oi.product_id = p.id 
+         WHERE oi.order_id = ?`
+      ).all(order.id);
+      order.items = itemRows;
+      return order;
+    });
 
     res.json(ordersWithItems);
   } catch (err) {
@@ -242,32 +233,28 @@ app.get('/api/orders/my-orders', authMiddleware, async (req, res) => {
 });
 
 // GET orders for guest (by order_numbers stored in localStorage)
-app.post('/api/orders/guest', async (req, res) => {
+app.post('/api/orders/guest', (req, res) => {
   const { order_numbers } = req.body;
   if (!order_numbers || order_numbers.length === 0)
     return res.json([]);
 
   try {
     const placeholders = order_numbers.map(() => '?').join(', ');
-    const [rows] = await db.query(
-      `SELECT * FROM orders WHERE order_number IN (${placeholders}) ORDER BY created_at DESC`,
-      order_numbers
-    );
+    const rows = db.prepare(
+      `SELECT * FROM orders WHERE order_number IN (${placeholders}) ORDER BY created_at DESC`
+    ).all(...order_numbers);
 
     // Fetch items for each order
-    const ordersWithItems = await Promise.all(
-      rows.map(async (order) => {
-        const [itemRows] = await db.query(
-          `SELECT oi.product_id, oi.quantity, oi.price, p.name as product_name, p.image_url 
-           FROM order_items oi 
-           LEFT JOIN products p ON oi.product_id = p.id 
-           WHERE oi.order_id = ?`,
-          [order.id]
-        );
-        order.items = itemRows;
-        return order;
-      })
-    );
+    const ordersWithItems = rows.map((order) => {
+      const itemRows = db.prepare(
+        `SELECT oi.product_id, oi.quantity, oi.price, p.name as product_name, p.image_url 
+         FROM order_items oi 
+         LEFT JOIN products p ON oi.product_id = p.id 
+         WHERE oi.order_id = ?`
+      ).all(order.id);
+      order.items = itemRows;
+      return order;
+    });
 
     res.json(ordersWithItems);
   } catch (err) {
@@ -276,7 +263,7 @@ app.post('/api/orders/guest', async (req, res) => {
 });
 
 // Track order by order ID
-app.get('/api/orders/track/:orderId', async (req, res) => {
+app.get('/api/orders/track/:orderId', (req, res) => {
   const { orderId } = req.params;
   
   if (!orderId || !orderId.startsWith('ORD')) {
@@ -284,25 +271,21 @@ app.get('/api/orders/track/:orderId', async (req, res) => {
   }
 
   try {
-    const [orderRows] = await db.query(
-      'SELECT * FROM orders WHERE order_number = ?',
-      [orderId]
-    );
+    const order = db.prepare(
+      'SELECT * FROM orders WHERE order_number = ?'
+    ).get(orderId);
 
-    if (orderRows.length === 0) {
+    if (!order) {
       return res.status(404).json({ error: 'Order not found' });
     }
 
-    const order = orderRows[0];
-
     // Get order items with product images
-    const [itemRows] = await db.query(
+    const itemRows = db.prepare(
       `SELECT oi.product_id, oi.quantity, oi.price, p.name as product_name, p.image_url 
        FROM order_items oi 
        LEFT JOIN products p ON oi.product_id = p.id 
-       WHERE oi.order_id = ?`,
-      [order.id]
-    );
+       WHERE oi.order_id = ?`
+    ).all(order.id);
 
     order.items = itemRows;
     res.json(order);
@@ -312,7 +295,7 @@ app.get('/api/orders/track/:orderId', async (req, res) => {
 });
 
 // Search orders by phone number
-app.post('/api/orders/search-by-phone', async (req, res) => {
+app.post('/api/orders/search-by-phone', (req, res) => {
   const { phone } = req.body;
 
   if (!phone || phone.length < 10) {
@@ -320,29 +303,25 @@ app.post('/api/orders/search-by-phone', async (req, res) => {
   }
 
   try {
-    const [orderRows] = await db.query(
-      'SELECT * FROM orders WHERE customer_phone LIKE ? ORDER BY created_at DESC',
-      [`%${phone}%`]
-    );
+    const orderRows = db.prepare(
+      'SELECT * FROM orders WHERE customer_phone LIKE ? ORDER BY created_at DESC'
+    ).all(`%${phone}%`);
 
     if (orderRows.length === 0) {
       return res.status(404).json({ error: 'No orders found' });
     }
 
     // Get items for all orders
-    const ordersWithItems = await Promise.all(
-      orderRows.map(async (order) => {
-        const [itemRows] = await db.query(
-          `SELECT oi.product_id, oi.quantity, oi.price, p.name as product_name, p.image_url 
-           FROM order_items oi 
-           LEFT JOIN products p ON oi.product_id = p.id 
-           WHERE oi.order_id = ?`,
-          [order.id]
-        );
-        order.items = itemRows;
-        return order;
-      })
-    );
+    const ordersWithItems = orderRows.map((order) => {
+      const itemRows = db.prepare(
+        `SELECT oi.product_id, oi.quantity, oi.price, p.name as product_name, p.image_url 
+         FROM order_items oi 
+         LEFT JOIN products p ON oi.product_id = p.id 
+         WHERE oi.order_id = ?`
+      ).all(order.id);
+      order.items = itemRows;
+      return order;
+    });
 
     res.json(ordersWithItems);
   } catch (err) {
@@ -353,12 +332,11 @@ app.post('/api/orders/search-by-phone', async (req, res) => {
 // ─── Saved Addresses ──────────────────────────────────────────────────────────
 
 // GET user's saved addresses
-app.get('/api/user/addresses', authMiddleware, async (req, res) => {
+app.get('/api/user/addresses', authMiddleware, (req, res) => {
   try {
-    const [rows] = await db.query(
-      'SELECT id, name, phone, address, pincode, is_default FROM saved_addresses WHERE user_id = ? ORDER BY is_default DESC, created_at DESC',
-      [req.user.id]
-    );
+    const rows = db.prepare(
+      'SELECT id, name, phone, address, pincode, is_default FROM saved_addresses WHERE user_id = ? ORDER BY is_default DESC, created_at DESC'
+    ).all(req.user.id);
     res.json(rows);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -366,7 +344,7 @@ app.get('/api/user/addresses', authMiddleware, async (req, res) => {
 });
 
 // POST new saved address
-app.post('/api/user/addresses', authMiddleware, async (req, res) => {
+app.post('/api/user/addresses', authMiddleware, (req, res) => {
   const { name, phone, address, pincode } = req.body;
 
   if (!name || !phone || !address || !pincode) {
@@ -374,19 +352,17 @@ app.post('/api/user/addresses', authMiddleware, async (req, res) => {
   }
 
   try {
+    const existing = db.prepare(
+      'SELECT id FROM saved_addresses WHERE user_id = ?'
+    ).get(req.user.id);
+
+    const is_default = existing ? 0 : 1;
     const addressId = uuidv4();
-    const [existing] = await db.query(
-      'SELECT id FROM saved_addresses WHERE user_id = ?',
-      [req.user.id]
-    );
 
-    const is_default = existing.length === 0;
-
-    await db.query(
+    db.prepare(
       `INSERT INTO saved_addresses (id, user_id, name, phone, address, pincode, is_default)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [addressId, req.user.id, name, phone, address, pincode, is_default]
-    );
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    ).run(addressId, req.user.id, name, phone, address, pincode, is_default);
 
     res.json({ id: addressId, name, phone, address, pincode, is_default });
   } catch (err) {
@@ -395,7 +371,7 @@ app.post('/api/user/addresses', authMiddleware, async (req, res) => {
 });
 
 // PUT update saved address
-app.put('/api/user/addresses/:id', authMiddleware, async (req, res) => {
+app.put('/api/user/addresses/:id', authMiddleware, (req, res) => {
   const { id } = req.params;
   const { name, phone, address, pincode } = req.body;
 
@@ -404,11 +380,10 @@ app.put('/api/user/addresses/:id', authMiddleware, async (req, res) => {
   }
 
   try {
-    await db.query(
+    db.prepare(
       `UPDATE saved_addresses SET name = ?, phone = ?, address = ?, pincode = ? 
-       WHERE id = ? AND user_id = ?`,
-      [name, phone, address, pincode, id, req.user.id]
-    );
+       WHERE id = ? AND user_id = ?`
+    ).run(name, phone, address, pincode, id, req.user.id);
     res.json({ id, name, phone, address, pincode });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -416,14 +391,13 @@ app.put('/api/user/addresses/:id', authMiddleware, async (req, res) => {
 });
 
 // DELETE saved address
-app.delete('/api/user/addresses/:id', authMiddleware, async (req, res) => {
+app.delete('/api/user/addresses/:id', authMiddleware, (req, res) => {
   const { id } = req.params;
 
   try {
-    await db.query(
-      'DELETE FROM saved_addresses WHERE id = ? AND user_id = ?',
-      [id, req.user.id]
-    );
+    db.prepare(
+      'DELETE FROM saved_addresses WHERE id = ? AND user_id = ?'
+    ).run(id, req.user.id);
     res.json({ message: 'Address deleted' });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -431,19 +405,17 @@ app.delete('/api/user/addresses/:id', authMiddleware, async (req, res) => {
 });
 
 // PUT set default address
-app.put('/api/user/addresses/:id/default', authMiddleware, async (req, res) => {
+app.put('/api/user/addresses/:id/default', authMiddleware, (req, res) => {
   const { id } = req.params;
 
   try {
-    await db.query(
-      'UPDATE saved_addresses SET is_default = 0 WHERE user_id = ?',
-      [req.user.id]
-    );
+    db.prepare(
+      'UPDATE saved_addresses SET is_default = 0 WHERE user_id = ?'
+    ).run(req.user.id);
 
-    await db.query(
-      'UPDATE saved_addresses SET is_default = 1 WHERE id = ? AND user_id = ?',
-      [id, req.user.id]
-    );
+    db.prepare(
+      'UPDATE saved_addresses SET is_default = 1 WHERE id = ? AND user_id = ?'
+    ).run(id, req.user.id);
 
     res.json({ message: 'Default address updated' });
   } catch (err) {
@@ -454,14 +426,14 @@ app.put('/api/user/addresses/:id/default', authMiddleware, async (req, res) => {
 // ─── Saved Payment Methods ────────────────────────────────────────────────────
 
 // GET user's saved payment methods
-app.get('/api/user/payments', authMiddleware, async (req, res) => {
+app.get('/api/user/payments', authMiddleware, (req, res) => {
   try {
-    const [rows] = await db.query(
-      `SELECT id, card_holder, CONCAT('****-****-****-', SUBSTR(card_number, -4)) as last_four, 
+    const rows = db.prepare(
+      `SELECT id, card_holder, 
+              ('****-****-****-' || SUBSTR(card_number, -4)) as last_four, 
               payment_method, is_default FROM saved_payments WHERE user_id = ? 
-       ORDER BY is_default DESC, created_at DESC`,
-      [req.user.id]
-    );
+       ORDER BY is_default DESC, created_at DESC`
+    ).all(req.user.id);
     res.json(rows);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -469,7 +441,7 @@ app.get('/api/user/payments', authMiddleware, async (req, res) => {
 });
 
 // POST new saved payment method
-app.post('/api/user/payments', authMiddleware, async (req, res) => {
+app.post('/api/user/payments', authMiddleware, (req, res) => {
   const { card_holder, card_number, payment_method } = req.body;
 
   if (!card_holder || !card_number || !payment_method) {
@@ -477,19 +449,17 @@ app.post('/api/user/payments', authMiddleware, async (req, res) => {
   }
 
   try {
+    const existing = db.prepare(
+      'SELECT id FROM saved_payments WHERE user_id = ?'
+    ).get(req.user.id);
+
+    const is_default = existing ? 0 : 1;
     const paymentId = uuidv4();
-    const [existing] = await db.query(
-      'SELECT id FROM saved_payments WHERE user_id = ?',
-      [req.user.id]
-    );
 
-    const is_default = existing.length === 0;
-
-    await db.query(
+    db.prepare(
       `INSERT INTO saved_payments (id, user_id, card_holder, card_number, payment_method, is_default)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-      [paymentId, req.user.id, card_holder, card_number, payment_method, is_default]
-    );
+       VALUES (?, ?, ?, ?, ?, ?)`
+    ).run(paymentId, req.user.id, card_holder, card_number, payment_method, is_default);
 
     const last_four = card_number.slice(-4);
     res.json({
@@ -505,7 +475,7 @@ app.post('/api/user/payments', authMiddleware, async (req, res) => {
 });
 
 // PUT update saved payment method
-app.put('/api/user/payments/:id', authMiddleware, async (req, res) => {
+app.put('/api/user/payments/:id', authMiddleware, (req, res) => {
   const { id } = req.params;
   const { card_holder, card_number, payment_method } = req.body;
 
@@ -514,11 +484,10 @@ app.put('/api/user/payments/:id', authMiddleware, async (req, res) => {
   }
 
   try {
-    await db.query(
+    db.prepare(
       `UPDATE saved_payments SET card_holder = ?, card_number = ?, payment_method = ? 
-       WHERE id = ? AND user_id = ?`,
-      [card_holder, card_number, payment_method, id, req.user.id]
-    );
+       WHERE id = ? AND user_id = ?`
+    ).run(card_holder, card_number, payment_method, id, req.user.id);
 
     const last_four = card_number.slice(-4);
     res.json({
@@ -533,14 +502,13 @@ app.put('/api/user/payments/:id', authMiddleware, async (req, res) => {
 });
 
 // DELETE saved payment method
-app.delete('/api/user/payments/:id', authMiddleware, async (req, res) => {
+app.delete('/api/user/payments/:id', authMiddleware, (req, res) => {
   const { id } = req.params;
 
   try {
-    await db.query(
-      'DELETE FROM saved_payments WHERE id = ? AND user_id = ?',
-      [id, req.user.id]
-    );
+    db.prepare(
+      'DELETE FROM saved_payments WHERE id = ? AND user_id = ?'
+    ).run(id, req.user.id);
     res.json({ message: 'Payment method deleted' });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -548,19 +516,17 @@ app.delete('/api/user/payments/:id', authMiddleware, async (req, res) => {
 });
 
 // PUT set default payment method
-app.put('/api/user/payments/:id/default', authMiddleware, async (req, res) => {
+app.put('/api/user/payments/:id/default', authMiddleware, (req, res) => {
   const { id } = req.params;
 
   try {
-    await db.query(
-      'UPDATE saved_payments SET is_default = 0 WHERE user_id = ?',
-      [req.user.id]
-    );
+    db.prepare(
+      'UPDATE saved_payments SET is_default = 0 WHERE user_id = ?'
+    ).run(req.user.id);
 
-    await db.query(
-      'UPDATE saved_payments SET is_default = 1 WHERE id = ? AND user_id = ?',
-      [id, req.user.id]
-    );
+    db.prepare(
+      'UPDATE saved_payments SET is_default = 1 WHERE id = ? AND user_id = ?'
+    ).run(id, req.user.id);
 
     res.json({ message: 'Default payment method updated' });
   } catch (err) {
@@ -571,15 +537,14 @@ app.put('/api/user/payments/:id/default', authMiddleware, async (req, res) => {
 // ─── Wishlist ─────────────────────────────────────────────────────────────
 
 // GET user's wishlist with product details
-app.get('/api/user/wishlist', authMiddleware, async (req, res) => {
+app.get('/api/user/wishlist', authMiddleware, (req, res) => {
   try {
-    const [rows] = await db.query(
+    const rows = db.prepare(
       `SELECT p.* FROM products p
        INNER JOIN wishlist w ON p.id = w.product_id
        WHERE w.user_id = ? 
-       ORDER BY w.created_at DESC`,
-      [req.user.id]
-    );
+       ORDER BY w.created_at DESC`
+    ).all(req.user.id);
     res.json(rows);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -587,7 +552,7 @@ app.get('/api/user/wishlist', authMiddleware, async (req, res) => {
 });
 
 // POST add product to wishlist
-app.post('/api/user/wishlist', authMiddleware, async (req, res) => {
+app.post('/api/user/wishlist', authMiddleware, (req, res) => {
   const { product_id } = req.body;
 
   if (!product_id) {
@@ -595,27 +560,22 @@ app.post('/api/user/wishlist', authMiddleware, async (req, res) => {
   }
 
   try {
-    const wishlistId = uuidv4();
-    
-    // Check if product exists
-    const [productRows] = await db.query(
-      'SELECT id FROM products WHERE id = ?',
-      [product_id]
-    );
+    const product = db.prepare(
+      'SELECT id FROM products WHERE id = ?'
+    ).get(product_id);
 
-    if (productRows.length === 0) {
+    if (!product) {
       return res.status(404).json({ error: 'Product not found' });
     }
 
-    // Try to add to wishlist
-    await db.query(
-      `INSERT INTO wishlist (id, user_id, product_id) VALUES (?, ?, ?)`,
-      [wishlistId, req.user.id, product_id]
-    );
+    const wishlistId = uuidv4();
+    db.prepare(
+      `INSERT INTO wishlist (id, user_id, product_id) VALUES (?, ?, ?)`
+    ).run(wishlistId, req.user.id, product_id);
 
     res.json({ id: wishlistId, product_id });
   } catch (err) {
-    if (err.code === 'ER_DUP_ENTRY') {
+    if (err.message.includes('UNIQUE')) {
       return res.status(400).json({ error: 'Product already in wishlist' });
     }
     res.status(500).json({ error: err.message });
@@ -623,16 +583,15 @@ app.post('/api/user/wishlist', authMiddleware, async (req, res) => {
 });
 
 // DELETE remove product from wishlist
-app.delete('/api/user/wishlist/:productId', authMiddleware, async (req, res) => {
+app.delete('/api/user/wishlist/:productId', authMiddleware, (req, res) => {
   const { productId } = req.params;
 
   try {
-    const [result] = await db.query(
-      'DELETE FROM wishlist WHERE product_id = ? AND user_id = ?',
-      [productId, req.user.id]
-    );
+    const result = db.prepare(
+      'DELETE FROM wishlist WHERE product_id = ? AND user_id = ?'
+    ).run(productId, req.user.id);
 
-    if (result.affectedRows === 0) {
+    if (result.changes === 0) {
       return res.status(404).json({ error: 'Item not found in wishlist' });
     }
 
@@ -643,16 +602,15 @@ app.delete('/api/user/wishlist/:productId', authMiddleware, async (req, res) => 
 });
 
 // GET check if product is in wishlist
-app.get('/api/user/wishlist/check/:productId', authMiddleware, async (req, res) => {
+app.get('/api/user/wishlist/check/:productId', authMiddleware, (req, res) => {
   const { productId } = req.params;
 
   try {
-    const [rows] = await db.query(
-      'SELECT id FROM wishlist WHERE product_id = ? AND user_id = ?',
-      [productId, req.user.id]
-    );
+    const row = db.prepare(
+      'SELECT id FROM wishlist WHERE product_id = ? AND user_id = ?'
+    ).get(productId, req.user.id);
 
-    res.json({ inWishlist: rows.length > 0 });
+    res.json({ inWishlist: !!row });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

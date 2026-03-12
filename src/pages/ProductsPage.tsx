@@ -6,24 +6,52 @@ import ProductCard from '../components/ProductCard';
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
 
-const categories = ['All', 'Fruits & Vegetables', 'Dairy & Eggs', 'Bakery', 'Beverages', 'Snacks', 'Staples'];
+interface Category {
+  id: string;
+  name: string;
+  icon: string;
+  color: string;
+  product_count: number;
+}
 
 export default function ProductsPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [products, setProducts] = useState<Product[]>([]);
+  const [categories, setCategories] = useState<Category[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState(
     searchParams.get('category') || 'All'
   );
 
+  // Fetch categories from API
+  useEffect(() => {
+    fetchCategories();
+  }, []);
+
+  // Fetch products when category changes
   useEffect(() => {
     fetchProducts();
-  }, []);
+  }, [selectedCategory]);
+
+  const fetchCategories = async () => {
+    try {
+      const res = await fetch(`${API_URL}/api/categories`);
+      if (!res.ok) throw new Error('Failed to fetch categories');
+      const data = await res.json();
+      setCategories(data);
+    } catch (error) {
+      console.error('Error fetching categories:', error);
+    }
+  };
 
   const fetchProducts = async () => {
     try {
-      const res = await fetch(`${API_URL}/api/products`);
+      let url = `${API_URL}/api/products`;
+      if (selectedCategory !== 'All') {
+        url += `?category=${encodeURIComponent(selectedCategory)}`;
+      }
+      const res = await fetch(url);
       if (!res.ok) throw new Error('Failed to fetch products');
       const data = await res.json();
       setProducts(data);
@@ -38,9 +66,7 @@ export default function ProductsPage() {
     const matchesSearch = product.name
       .toLowerCase()
       .includes(searchQuery.toLowerCase());
-    const matchesCategory =
-      selectedCategory === 'All' || product.category === selectedCategory;
-    return matchesSearch && matchesCategory;
+    return matchesSearch;
   });
 
   const handleCategoryChange = (category: string) => {
@@ -76,17 +102,28 @@ export default function ProductsPage() {
             />
           </div>
           <div className="flex flex-wrap gap-2">
+            <button
+              onClick={() => handleCategoryChange('All')}
+              className={`px-4 py-2 rounded-lg font-medium transition ${
+                selectedCategory === 'All'
+                  ? 'bg-green-600 text-white'
+                  : 'bg-white text-gray-700 hover:bg-gray-100'
+              }`}
+            >
+              All
+            </button>
             {categories.map((category) => (
               <button
-                key={category}
-                onClick={() => handleCategoryChange(category)}
-                className={`px-4 py-2 rounded-lg font-medium transition ${
-                  selectedCategory === category
+                key={category.id}
+                onClick={() => handleCategoryChange(category.name)}
+                className={`px-4 py-2 rounded-lg font-medium transition flex items-center gap-2 ${
+                  selectedCategory === category.name
                     ? 'bg-green-600 text-white'
                     : 'bg-white text-gray-700 hover:bg-gray-100'
                 }`}
               >
-                {category}
+                <span>{category.icon}</span>
+                {category.name}
               </button>
             ))}
           </div>
