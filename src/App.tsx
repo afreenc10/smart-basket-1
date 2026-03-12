@@ -5,7 +5,9 @@ import { WishlistProvider } from './contexts/WishlistContext';
 import { PaymentProvider } from './contexts/PaymentContext';
 import { NotificationProvider } from './contexts/NotificationContext';
 import Navbar from './components/Navbar';
+import GeolocationWidget from './components/GeolocationWidget';
 import Toast from './components/Toast';
+import { GeoLocation } from './lib/geolocation';
 import HomePage from './pages/HomePage';
 import ProductsPage from './pages/ProductsPage';
 import CartPage from './pages/CartPage';
@@ -18,6 +20,10 @@ import LoginPage from './pages/LoginPage';
 import RegisterPage from './pages/RegisterPage';
 
 function App() {
+  const handleLocationSelect = (location: GeoLocation) => {
+    sessionStorage.setItem('userLocation', JSON.stringify(location));
+  };
+
   return (
     <Router>
       <AuthProvider>
@@ -27,6 +33,7 @@ function App() {
               <NotificationProvider>
                 <div className="min-h-screen bg-gray-50">
                   <Navbar />
+                  <GeolocationWidget onLocationSelect={handleLocationSelect} />
                   <Routes>
                     <Route path="/" element={<HomePage />} />
                     <Route path="/products" element={<ProductsPage />} />

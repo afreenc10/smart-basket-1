@@ -90,7 +90,7 @@ export default function OrdersPage() {
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <h1 className="text-4xl font-bold text-gray-900 mb-8">My Orders</h1>
 
-        <div className="space-y-4">
+        <div className="space-y-6">
           {orders.map((order) => {
             const status = order.status as keyof typeof statusConfig;
             const config = statusConfig[status] || statusConfig['Pending'];
@@ -99,50 +99,88 @@ export default function OrdersPage() {
             return (
               <div
                 key={order.id}
-                className="bg-white rounded-lg shadow-md p-6 hover:shadow-lg transition"
+                className="bg-white rounded-lg shadow-md overflow-hidden hover:shadow-lg transition"
               >
-                <div className="flex flex-col md:flex-row md:items-center md:justify-between mb-4">
-                  <div>
-                    <h3 className="text-xl font-bold text-gray-900 mb-1">
-                      Order #{order.order_number}
-                    </h3>
-                    <p className="text-sm text-gray-600">
-                      Placed on {new Date(order.created_at).toLocaleDateString('en-IN', {
-                        year: 'numeric',
-                        month: 'long',
-                        day: 'numeric',
-                        hour: '2-digit',
-                        minute: '2-digit',
-                      })}
-                    </p>
+                <div className="p-6">
+                  <div className="flex flex-col md:flex-row md:items-center md:justify-between mb-4">
+                    <div>
+                      <h3 className="text-xl font-bold text-gray-900 mb-1">
+                        Order #{order.order_number}
+                      </h3>
+                      <p className="text-sm text-gray-600">
+                        Placed on {new Date(order.created_at).toLocaleDateString('en-IN', {
+                          year: 'numeric',
+                          month: 'long',
+                          day: 'numeric',
+                          hour: '2-digit',
+                          minute: '2-digit',
+                        })}
+                      </p>
+                    </div>
+                    <div className="mt-3 md:mt-0">
+                      <span className={`inline-flex items-center space-x-2 px-4 py-2 rounded-full ${config.color} font-semibold`}>
+                        <StatusIcon className={`h-5 w-5 ${config.iconColor}`} />
+                        <span>{order.status}</span>
+                      </span>
+                    </div>
                   </div>
-                  <div className="mt-3 md:mt-0">
-                    <span className={`inline-flex items-center space-x-2 px-4 py-2 rounded-full ${config.color} font-semibold`}>
-                      <StatusIcon className={`h-5 w-5 ${config.iconColor}`} />
-                      <span>{order.status}</span>
-                    </span>
-                  </div>
-                </div>
 
-                <div className="border-t pt-4 grid md:grid-cols-2 gap-4">
-                  <div>
-                    <h4 className="font-semibold text-gray-900 mb-2">Delivery Address</h4>
-                    <p className="text-gray-600 text-sm">{order.customer_name}</p>
-                    <p className="text-gray-600 text-sm">{order.customer_phone}</p>
-                    <p className="text-gray-600 text-sm">{order.delivery_address}</p>
-                    <p className="text-gray-600 text-sm">Pincode: {order.pincode}</p>
+                  <div className="border-t pt-4 grid md:grid-cols-2 gap-4 mb-6">
+                    <div>
+                      <h4 className="font-semibold text-gray-900 mb-2">Delivery Address</h4>
+                      <p className="text-gray-600 text-sm">{order.customer_name}</p>
+                      <p className="text-gray-600 text-sm">{order.customer_phone}</p>
+                      <p className="text-gray-600 text-sm">{order.delivery_address}</p>
+                      <p className="text-gray-600 text-sm">Pincode: {order.pincode}</p>
+                    </div>
+                    <div className="text-right">
+                      <p className="text-sm text-gray-600 mb-1">Total Amount</p>
+                      <p className="text-3xl font-bold text-green-600">
+                        ₹{Number(order.total_amount).toFixed(2)}
+                      </p>
+                    </div>
                   </div>
-                  <div className="text-right">
-                    <p className="text-sm text-gray-600 mb-1">Total Amount</p>
-                    <p className="text-3xl font-bold text-green-600">
-                      ₹{Number(order.total_amount).toFixed(2)}
-                    </p>
-                  </div>
+
+                  {/* Order Items with Images */}
+                  {order.items && order.items.length > 0 && (
+                    <div>
+                      <h4 className="font-semibold text-gray-900 mb-3">Order Items</h4>
+                      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
+                        {order.items.map((item: any, index: number) => (
+                          <div
+                            key={index}
+                            className="flex flex-col items-center text-center"
+                          >
+                            <div className="w-full aspect-square mb-2 overflow-hidden rounded-lg bg-gray-100">
+                              {item.image_url ? (
+                                <img
+                                  src={item.image_url}
+                                  alt={item.product_name}
+                                  className="w-full h-full object-cover"
+                                />
+                              ) : (
+                                <div className="w-full h-full flex items-center justify-center bg-gray-200">
+                                  <Package className="h-8 w-8 text-gray-400" />
+                                </div>
+                              )}
+                            </div>
+                            <p className="text-sm font-medium text-gray-900 line-clamp-2 mb-1">
+                              {item.product_name}
+                            </p>
+                            <p className="text-xs text-gray-600 mb-1">Qty: {item.quantity}</p>
+                            <p className="text-sm font-semibold text-green-600">
+                              ₹{(item.price * item.quantity).toFixed(2)}
+                            </p>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
             );
           })}
-        </div>f
+        </div>
       </div>
     </div>
   );

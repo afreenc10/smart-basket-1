@@ -219,7 +219,23 @@ app.get('/api/orders/my-orders', authMiddleware, async (req, res) => {
       'SELECT * FROM orders WHERE user_id = ? ORDER BY created_at DESC',
       [req.user.id]
     );
-    res.json(rows);
+
+    // Fetch items for each order
+    const ordersWithItems = await Promise.all(
+      rows.map(async (order) => {
+        const [itemRows] = await db.query(
+          `SELECT oi.product_id, oi.quantity, oi.price, p.name as product_name, p.image_url 
+           FROM order_items oi 
+           LEFT JOIN products p ON oi.product_id = p.id 
+           WHERE oi.order_id = ?`,
+          [order.id]
+        );
+        order.items = itemRows;
+        return order;
+      })
+    );
+
+    res.json(ordersWithItems);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -237,7 +253,23 @@ app.post('/api/orders/guest', async (req, res) => {
       `SELECT * FROM orders WHERE order_number IN (${placeholders}) ORDER BY created_at DESC`,
       order_numbers
     );
-    res.json(rows);
+
+    // Fetch items for each order
+    const ordersWithItems = await Promise.all(
+      rows.map(async (order) => {
+        const [itemRows] = await db.query(
+          `SELECT oi.product_id, oi.quantity, oi.price, p.name as product_name, p.image_url 
+           FROM order_items oi 
+           LEFT JOIN products p ON oi.product_id = p.id 
+           WHERE oi.order_id = ?`,
+          [order.id]
+        );
+        order.items = itemRows;
+        return order;
+      })
+    );
+
+    res.json(ordersWithItems);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -263,9 +295,9 @@ app.get('/api/orders/track/:orderId', async (req, res) => {
 
     const order = orderRows[0];
 
-    // Get order items
+    // Get order items with product images
     const [itemRows] = await db.query(
-      `SELECT oi.product_id, oi.quantity, oi.price, p.name as product_name 
+      `SELECT oi.product_id, oi.quantity, oi.price, p.name as product_name, p.image_url 
        FROM order_items oi 
        LEFT JOIN products p ON oi.product_id = p.id 
        WHERE oi.order_id = ?`,
@@ -301,7 +333,7 @@ app.post('/api/orders/search-by-phone', async (req, res) => {
     const ordersWithItems = await Promise.all(
       orderRows.map(async (order) => {
         const [itemRows] = await db.query(
-          `SELECT oi.product_id, oi.quantity, oi.price, p.name as product_name 
+          `SELECT oi.product_id, oi.quantity, oi.price, p.name as product_name, p.image_url 
            FROM order_items oi 
            LEFT JOIN products p ON oi.product_id = p.id 
            WHERE oi.order_id = ?`,
